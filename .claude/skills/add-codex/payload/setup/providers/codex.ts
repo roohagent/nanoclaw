@@ -5,6 +5,7 @@
  * would invalidate it. Both setup entry points use this provider hook.
  */
 import { spawn, spawnSync } from 'child_process';
+import { upsertEnvKey } from '../environment.js';
 import { getCredentialStore, type ProviderCredentialStore } from '../gateways/credential-store.js';
 import fs from 'fs';
 import os from 'os';
@@ -208,11 +209,31 @@ export async function runCodexLoginAuth(method: 'browser' | 'device', store?: Pr
     console.log(k.dim(`   ${message}`));
     process.exit(1);
   }
+  saveChatgptAccountId(authJsonPath);
   removeLoginHome();
   setupLog.step('auth', 'success', durationMs, { PROVIDER: 'codex', METHOD: method });
   p.log.success(
     brandBody('OpenAI account connected — credentials live in your selected gateway, never in the container.'),
   );
+}
+
+/**
+ * Codex >= 0.162 rejects a ChatGPT stub whose workspace (account id) is not in
+ * the signed-in account's workspace list, and a gateway's container stub only
+ * carries a placeholder. Record the real account id — an identifier, not a
+ * credential — so the gateway can put it in the stub. Best effort: a missing
+ * or unreadable id leaves `.env` alone, and nothing from the file is logged.
+ */
+function saveChatgptAccountId(authJsonPath: string): void {
+  try {
+    const auth = JSON.parse(fs.readFileSync(authJsonPath, 'utf-8')) as { tokens?: { account_id?: unknown } };
+    const accountId = auth.tokens?.account_id;
+    if (typeof accountId === 'string' && /^[A-Za-z0-9-]+$/.test(accountId)) {
+      upsertEnvKey('CODEX_CHATGPT_ACCOUNT_ID', accountId);
+    }
+  } catch {
+    /* best effort */
+  }
 }
 
 function runInherit(cmd: string, args: string[], extraEnv?: Record<string, string>): Promise<number> {

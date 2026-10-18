@@ -20,6 +20,10 @@ vi.mock('child_process', () => ({
 // Keep the auth flow's structured logging out of logs/setup.log.
 vi.mock('../logs.js', () => ({ step: vi.fn(), userInput: vi.fn() }));
 
+// Keep the login flow from writing the checkout's .env.
+const mockUpsertEnvKey = vi.fn();
+vi.mock('../environment.js', () => ({ upsertEnvKey: (...args: unknown[]) => mockUpsertEnvKey(...args) }));
+
 // The API-key path reads the key through clack's masked prompt; everything
 // else in the module keeps the real clack rendering.
 const mockPassword = vi.fn();
@@ -154,7 +158,7 @@ describe('runCodexLoginAuth', () => {
     mockSpawn.mockImplementation((...args: unknown[]) => {
       const opts = args[2] as { env?: NodeJS.ProcessEnv };
       loginEnv = opts.env;
-      fs.writeFileSync(path.join(opts.env!.CODEX_HOME!, 'auth.json'), '{"tokens":{}}');
+      fs.writeFileSync(path.join(opts.env!.CODEX_HOME!, 'auth.json'), '{"tokens":{"account_id":"acct-123"}}');
       const child = new EventEmitter();
       setImmediate(() => child.emit('close', 0));
       return child;
@@ -172,6 +176,9 @@ describe('runCodexLoginAuth', () => {
 
     // The vault snapshot was read from the isolated dir, not ~/.codex.
     expect(save).toHaveBeenCalledWith('codex', { kind: 'oauth', file: path.join(codexHome!, 'auth.json') });
+
+    // The non-secret account id is recorded for the gateway's container stub.
+    expect(mockUpsertEnvKey).toHaveBeenCalledWith('CODEX_CHATGPT_ACCOUNT_ID', 'acct-123');
 
     // The isolated dir holds a live credential — gone once vaulted.
     expect(fs.existsSync(codexHome!)).toBe(false);

@@ -54,7 +54,7 @@ vi.mock('../env.js', () => ({
   }),
 }));
 
-import { contributionFromConfig, withProviderEnv } from './onecli.js';
+import { contributionFromConfig, withCodexAccountId, withProviderEnv } from './onecli.js';
 import { getGatewayProviderRegistration } from './gateway-provider-registry.js';
 
 const provider = getGatewayProviderRegistration('onecli')!;
@@ -193,6 +193,53 @@ describe('OneCLI gateway package', () => {
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it('writes the configured ChatGPT account id into the codex stub only', () => {
+    const claim = 'https://api.openai.com/auth';
+    const jwt = (claims: object) => ['h', Buffer.from(JSON.stringify(claims)).toString('base64url'), 's'].join('.');
+    const stub = JSON.stringify({
+      auth_mode: 'chatgpt',
+      tokens: {
+        account_id: 'onecli-managed',
+        id_token: jwt({ [claim]: { chatgpt_account_id: 'onecli-managed', chatgpt_plan_type: 'free' } }),
+        access_token: 'onecli-managed',
+      },
+    });
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'onecli-stubs-'));
+    try {
+      const contribution = contributionFromConfig(
+        {
+          env: {},
+          caCertificate: 'CA',
+          caCertificateContainerPath: '/tmp/ca.pem',
+          credentialStubs: [
+            { containerPath: '/home/node/.codex/auth.json', content: stub },
+            { containerPath: '/home/node/.config/other.json', content: stub },
+          ],
+        },
+        'g1',
+        root,
+        'acct-real',
+      );
+      const read = (p: string) =>
+        fs.readFileSync(contribution.mounts!.find((m) => m.containerPath === p)!.hostPath, 'utf-8');
+      const codex = JSON.parse(read('/home/node/.codex/auth.json'));
+      expect(codex.tokens.account_id).toBe('acct-real');
+      expect(codex.tokens.access_token).toBe('onecli-managed');
+      const claims = JSON.parse(Buffer.from(codex.tokens.id_token.split('.')[1], 'base64url').toString());
+      expect(claims[claim]).toEqual({ chatgpt_account_id: 'acct-real', chatgpt_plan_type: 'free' });
+      expect(read('/home/node/.config/other.json')).toBe(stub);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves the codex stub unchanged without an account id or when it is not JSON', () => {
+    expect(withCodexAccountId('{"tokens":{"account_id":"onecli-managed"}}', undefined)).toBe(
+      '{"tokens":{"account_id":"onecli-managed"}}',
+    );
+    expect(withCodexAccountId('codex-stub', 'acct-real')).toBe('codex-stub');
   });
 
   it('propagates approval startup failure so core can reconnect', async () => {

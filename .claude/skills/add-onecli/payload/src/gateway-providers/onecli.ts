@@ -22,7 +22,9 @@ const env = readEnvFile([
   'ONECLI_GATEWAY_CONTAINER',
   'ANTHROPIC_BASE_URL',
   'ONECLI_CONSOLE_URL',
+  'CODEX_CHATGPT_ACCOUNT_ID',
 ]);
+const codexAccountId = process.env.CODEX_CHATGPT_ACCOUNT_ID || env.CODEX_CHATGPT_ACCOUNT_ID;
 const onecliUrl = process.env.ONECLI_URL || env.ONECLI_URL;
 const onecliApiKey = process.env.ONECLI_API_KEY || env.ONECLI_API_KEY;
 const gatewayContainer = process.env.ONECLI_GATEWAY_CONTAINER || env.ONECLI_GATEWAY_CONTAINER || 'onecli';
@@ -36,11 +38,43 @@ let probing = false;
 type OneCLIContribution = Omit<GatewayContribution, 'networkAccess'>;
 type GatewayMount = NonNullable<GatewayContribution['mounts']>[number];
 
+const CODEX_AUTH_STUB = /\.codex[\\/]auth\.json$/;
+
+/**
+ * Codex >= 0.162 checks the stub's selected ChatGPT workspace against
+ * `wham/accounts/check` before every turn, and OneCLI's stub carries the
+ * placeholder account id `onecli-managed`, which never matches — every turn
+ * fails with "selected workspace missing from routing discovery". The account
+ * id is an identifier, not a credential, so write the real one into
+ * `tokens.account_id` and the id_token's `chatgpt_account_id` claim. The token
+ * values stay placeholders; an unparseable stub is returned unchanged.
+ */
+export function withCodexAccountId(content: string, accountId: string | undefined): string {
+  if (!accountId) return content;
+  try {
+    const auth = JSON.parse(content) as { tokens?: { account_id?: string; id_token?: string } };
+    if (!auth.tokens) return content;
+    auth.tokens.account_id = accountId;
+    const parts = auth.tokens.id_token?.split('.');
+    if (parts && parts.length === 3) {
+      const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8')) as Record<string, unknown>;
+      const key = 'https://api.openai.com/auth';
+      claims[key] = { ...(claims[key] as Record<string, unknown> | undefined), chatgpt_account_id: accountId };
+      parts[1] = Buffer.from(JSON.stringify(claims)).toString('base64url');
+      auth.tokens.id_token = parts.join('.');
+    }
+    return JSON.stringify(auth, null, 2);
+  } catch {
+    return content;
+  }
+}
+
 /** Stage immutable per-content files; SDK temporary basenames are shared across agents. */
 export function contributionFromConfig(
   config: ContainerConfig,
   groupScope: string,
   dataDir = DATA_DIR,
+  accountId = codexAccountId,
 ): OneCLIContribution {
   const env = { ...config.env };
   const mounts: GatewayMount[] = [];
@@ -61,7 +95,12 @@ export function contributionFromConfig(
     env.SSL_CERT_FILE = target;
     env.DENO_CERT = target;
   }
-  for (const stub of config.credentialStubs ?? []) mount('stub', stub.content, stub.containerPath);
+  for (const stub of config.credentialStubs ?? []) {
+    const content = CODEX_AUTH_STUB.test(stub.containerPath)
+      ? withCodexAccountId(stub.content, accountId)
+      : stub.content;
+    mount('stub', content, stub.containerPath);
+  }
   return { env, mounts };
 }
 
